@@ -1,0 +1,203 @@
+/*
+ * Copyright 2023 The RuleGo Authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package engine
+
+import (
+	"go-study/rulego/api/types"
+	"go-study/rulego/utils/fs"
+	"log"
+	"strings"
+	"sync"
+)
+
+var _ types.RuleEnginePool = (*Pool)(nil)
+
+var DefaultPool = &Pool{}
+
+// Pool is a pool of rule engine instances.
+// Pool 是规则引擎实例池。
+type Pool struct {
+	// A concurrent map to store rule engine instances.
+	// 用于存储规则引擎实例的并发映射
+	entries sync.Map
+}
+
+// NewPool creates a new instance of a rule engine pool.
+// NewPool 创建规则引擎池的新实例
+func NewPool() *Pool {
+	return &Pool{}
+}
+
+// Load loads all rule chain configurations from a specified folder and its subfolders into the rule engine instance pool.
+// 加载将指定文件夹及其子文件夹中的所有规则链配置加载到规则引擎实例池中。
+// The rule chain ID is taken from the configuration file's ruleChain.id.
+// 规则链ID取自配置文件的ruleChain.id。
+func (g *Pool) Load(folderPath string, opts ...types.RuleEngineOption) error {
+	// Ensure the folder path ends with a pattern that matches JSON files.
+	// 确保文件夹路径以与 JSON 文件匹配的模式结尾。
+	if !strings.HasSuffix(folderPath, "*.json") && !strings.HasSuffix(folderPath, "*.JSON") {
+		if strings.HasSuffix(folderPath, "/") || strings.HasSuffix(folderPath, "\\") {
+			folderPath = folderPath + "*.json"
+		} else if folderPath == "" {
+			folderPath = "./*.json"
+		} else {
+			folderPath = folderPath + "/*.json"
+		}
+	}
+	// Get all file paths that match the pattern.
+	// 获取与模式匹配的所有文件路径。
+	paths, err := fs.GetFilePaths(folderPath)
+	if err != nil {
+		return err
+	}
+	// Load each file and create a new rule engine instance from its contents.
+	for _, path := range paths {
+		b := fs.LoadFile(path)
+		if b != nil {
+			if _, err = g.New("", b, opts...); err != nil {
+				log.Println("Load rule chain error:", err)
+			}
+		}
+	}
+	return nil
+}
+
+// New creates a new RuleEngine instance and stores it in the rule chain pool.
+// New创建一个新的RuleEngine实例，并存放到规则链池中。
+// If the specified id is empty, the ruleChain.id from the rule chain file is used.
+// 如果指定的 id 为空，则使用规则链文件中的 ruleChain.id。
+func (g *Pool) New(id string, rootRuleChainSrc []byte, opts ...types.RuleEngineOption) (types.RuleEngine, error) {
+	// Check if an instance with the given ID already exists.
+	// 检查具有给定 ID 的实例是否已经存在
+	if v, ok := g.entries.Load(id); ok {
+		return v.(*RuleEngine), nil
+	} else {
+		opts = append(opts, types.WithRuleEnginePool(g))
+		// Create a new rule engine instance.
+		// 创建一个新的规则引擎实例
+		if ruleEngine, err := newRuleEngine(id, rootRuleChainSrc, opts...); err != nil {
+			return nil, err
+		} else {
+			// Store the new rule engine instance in the pool.
+			// 将新的规则引擎实例存储在池中。
+			if ruleEngine.Id() != "" {
+				g.entries.Store(ruleEngine.Id(), ruleEngine)
+			}
+			return ruleEngine, err
+		}
+
+	}
+}
+
+// Get retrieves a rule engine instance by its ID.
+func (g *Pool) Get(id string) (types.RuleEngine, bool) {
+	v, ok := g.entries.Load(id)
+	if ok {
+		return v.(*RuleEngine), ok
+	} else {
+		return nil, false
+	}
+}
+
+// Del deletes a rule engine instance by its ID.
+func (g *Pool) Del(id string) {
+	v, ok := g.entries.Load(id)
+	if ok {
+		v.(*RuleEngine).Stop()
+		g.entries.Delete(id)
+	}
+}
+
+// Stop releases all rule engine instances in the pool.
+func (g *Pool) Stop() {
+	g.entries.Range(func(key, value any) bool {
+		if item, ok := value.(*RuleEngine); ok {
+			item.Stop()
+		}
+		g.entries.Delete(key)
+		return true
+	})
+}
+
+// Range iterates over all rule engine instances in the pool.
+func (g *Pool) Range(f func(key, value any) bool) {
+	g.entries.Range(f)
+}
+
+// Reload reloads all rule engine instances in the pool with the given options.
+func (g *Pool) Reload(opts ...types.RuleEngineOption) {
+	g.entries.Range(func(key, value any) bool {
+		_ = value.(*RuleEngine).Reload(opts...)
+		return true
+	})
+}
+
+// OnMsg invokes all rule engine instances to process a message.
+// All rule chains in the rule engine instance pool will attempt to process the message.
+func (g *Pool) OnMsg(msg types.RuleMsg) {
+	g.entries.Range(func(key, value any) bool {
+		if item, ok := value.(*RuleEngine); ok {
+			item.OnMsg(msg)
+		}
+		return true
+	})
+}
+
+// Load loads all rule chain configurations from the specified folder and its subfolders into the default rule engine instance pool.
+// The rule chain ID is taken from the configuration file's ruleChain.id.
+func Load(folderPath string, opts ...types.RuleEngineOption) error {
+	return DefaultPool.Load(folderPath, opts...)
+}
+
+// New creates a new RuleEngine and stores it in the default rule chain pool.
+func New(id string, rootRuleChainSrc []byte, opts ...types.RuleEngineOption) (types.RuleEngine, error) {
+	return DefaultPool.New(id, rootRuleChainSrc, opts...)
+}
+
+// Get retrieves a specified ID rule engine instance from the default rule chain pool.
+func Get(id string) (types.RuleEngine, bool) {
+	return DefaultPool.Get(id)
+}
+
+// Del deletes a specified ID rule engine instance from the default rule chain pool.
+func Del(id string) {
+	DefaultPool.Del(id)
+}
+
+// Stop releases all rule engine instances in the default rule chain pool.
+func Stop() {
+	DefaultPool.Stop()
+}
+
+// OnMsg calls all rule engine instances in the default rule chain pool to process a message.
+// All rule chains in the rule engine instance pool will attempt to process the message.
+func OnMsg(msg types.RuleMsg) {
+	DefaultPool.OnMsg(msg)
+}
+
+// Reload reloads all rule engine instances in the default rule chain pool.
+func Reload(opts ...types.RuleEngineOption) {
+	DefaultPool.entries.Range(func(key, value any) bool {
+		_ = value.(types.RuleEngine).Reload(opts...)
+		return true
+	})
+}
+
+// Range iterates over all rule engine instances in the default rule chain pool.
+func Range(f func(key, value any) bool) {
+	DefaultPool.entries.Range(f)
+}
