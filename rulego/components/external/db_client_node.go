@@ -48,6 +48,7 @@ type DbClientNodeConfiguration struct {
 	GetOne bool
 }
 
+/*数据库客户端节点*/
 type DbClientNode struct {
 	base.SharedNode[*sql.DB]
 	//节点配置
@@ -69,6 +70,7 @@ func (x *DbClientNode) Type() string {
 	return "dbClient"
 }
 
+// New 创建DbClientNode
 func (x *DbClientNode) New() types.Node {
 	return &DbClientNode{Config: DbClientNodeConfiguration{
 		Sql:        "select * from test",
